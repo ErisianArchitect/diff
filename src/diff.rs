@@ -1,6 +1,12 @@
+use std::mem::MaybeUninit;
+
 
 /// Stores only two rows at a time. Keeps track of the minimum
 /// edit script length as the table is built.
+/// This makes it possible to calculate the edit script length while building the
+/// edit distance table without allocating an entire table for the edit lengths.
+/// This utilizes the fact that the only possible cells that will be checked
+/// are `(x, x)`, `(x - 1, y)`, `(x, y - 1)`, or `(x - 1, y - 1)`.
 struct EditLenTracker {
     rows: [Vec<usize>; 2],
     /// The indices into `rows`.
@@ -186,6 +192,14 @@ impl<T> EditValue<T> {
             EditValue::Unchanged(value) => EditValue::Unchanged(f(value)),
         }
     }
+
+    pub fn edit_type(&self) -> EditType {
+        match self {
+            EditValue::Deleted(_) => EditType::Deleted,
+            EditValue::Inserted(_) => EditType::Inserted,
+            EditValue::Unchanged(_) => EditType::Unchanged,
+        }
+    }
 }
 
 impl<T: Clone> Clone for EditValue<T> {
@@ -259,6 +273,9 @@ impl<'a, T: PartialEq<T>> EditTable<'a, T> {
     fn compare(&self, x: usize, y: usize) -> bool {
         match (x, y) {
             (0, 0) => true,
+            // I've thought about this, and it's a little confusing. I do believe that (0, _) and (_, 0) should return
+            // false since you could consider them to be matching the null element with a non-null element, which should
+            // not be equal.
             (0, _) => false,
             (_, 0) => false,
             (x, y) => {
@@ -272,7 +289,7 @@ impl<'a, T: PartialEq<T>> EditTable<'a, T> {
         ((y - 1) * (self.width - 1)) + (x - 1)
     }
 
-    pub fn get(&self, x: usize, y: usize) -> usize {
+    fn get(&self, x: usize, y: usize) -> usize {
         match (x, y) {
             (0, 0) => 0,
             (0, y) => y,
@@ -286,8 +303,10 @@ impl<'a, T: PartialEq<T>> EditTable<'a, T> {
 
     fn set(&mut self, x: usize, y: usize, value: usize) {
         match (x, y) {
-            (0, _) => (),
-            (_, 0) => (),
+            // If you get this `unreachable` panic, that means that you tried to
+            // set a value in a row/column that doesn't exist. You can't set values at x==0 || y == 0.
+            (0, _) => unreachable!("This should not happen. If this happens, change your code."),
+            (_, 0) => unreachable!("This should not happen. If this happens, change your code."),
             (x, y) => {
                 let index = self.index_at(x, y);
                 self.cells[index] = value;
@@ -296,7 +315,7 @@ impl<'a, T: PartialEq<T>> EditTable<'a, T> {
     }
 
     /// Returns (edit_script_length, EditTable).
-    pub fn build(old: &'a [T], new: &'a [T]) -> (usize, Self) {
+    fn build(old: &'a [T], new: &'a [T]) -> (usize, Self) {
         let mut table = EditTable::new(old, new);
         let mut len_tracker = EditLenTracker::new(table.width, 0);
         for y in 1..new.len() + 1 {
@@ -305,8 +324,8 @@ impl<'a, T: PartialEq<T>> EditTable<'a, T> {
                     table.set(x, y, table.get(x - 1, y - 1));
                     len_tracker.set(x, y, len_tracker.get(x - 1, y - 1) + 1);
                 } else {
-                    let left = table.get(x - 1, y);
                     let top = table.get(x, y - 1);
+                    let left = table.get(x - 1, y);
                     let (dp, len) = if top <= left {
                         (top, len_tracker.get(x, y - 1))
                     } else {
@@ -371,82 +390,38 @@ impl DiffRangesBuilder {
     }
 }
 
-struct DiffRangeCounter {
-    current: Option<EditType>,
+struct EditRangeCounter {
+    current_type: Option<EditType>,
     count: usize,
 }
 
-impl DiffRangeCounter {
+impl EditRangeCounter {
     fn new() -> Self {
         Self {
-            current: None,
+            current_type: None,
             count: 0,
         }
     }
 
-    fn record(&mut self, edit: Edit) -> Edit {
-        if let Some(current) = self.current {
-            match (current, edit) {
-                (EditType::Deleted, Edit::Deleted(_)) => (),
-                (EditType::Inserted, Edit::Inserted(_)) => (),
-                (EditType::Unchanged, Edit::Unchanged(_)) => (),
-                _ => self.count += 1,
+    /// Sets the current type and increases the count by `1`.
+    #[inline]
+    fn set_current_type(&mut self, edit_type: EditType) {
+        self.count += 1;
+        self.current_type = Some(edit_type);
+    }
+
+    /// Works as a pass through. It determines whether to increase the count
+    /// based on the input value, then returns the input value untouched.
+    #[inline]
+    fn record(&mut self, edit_type: EditType) {
+        if let Some(current_type) = self.current_type {
+            if current_type != edit_type {
+                self.set_current_type(edit_type);
             }
         } else {
-            self.count += 1;
-        }
-        self.current.replace(edit.edit_type());
-        edit
-    }
-}
-
-/// Builds an edit script in reverse order. This means that you would need to reverse the elements in order
-/// to get the correct order. This is just a byproduct of the way the algorithm works, but it's handy
-/// because it makes it simple to create an [EditRange] script.
-pub fn reverse_diff<'a, T: PartialEq<T>>(old: &'a [T], new: &'a [T]) -> (usize, Vec<Edit>) {
-    let mut range_counter = DiffRangeCounter::new();
-    let (script_len, table) = EditTable::build(old, new);
-    let mut edits = Vec::with_capacity(script_len);
-    let mut xy = (old.len(), new.len());
-    loop {
-        match xy {
-            (0, 0) => break,
-            (0, mut y) => {
-                while y != 0 {
-                    edits.push(range_counter.record(Edit::Inserted(y - 1)));
-                    y -= 1;
-                }
-                break;
-            }
-            (mut x, 0) => {
-                while x != 0 {
-                    edits.push(range_counter.record(Edit::Deleted(x - 1)));
-                    x -= 1;
-                }
-                break;
-            }
-            (x, y) => {
-                let curr = table.get(x, y);
-                if table.compare(x, y)
-                && curr == table.get(x - 1, y - 1) {
-                    edits.push(range_counter.record(Edit::Unchanged(x - 1)));
-                    xy = (x - 1, y - 1);
-                } else if curr == table.get(x, y - 1) + 1 {
-                    edits.push(range_counter.record(Edit::Inserted(y - 1)));
-                    xy.1 -= 1;
-                } else if curr == table.get(x - 1, y) + 1 {
-                    edits.push(range_counter.record(Edit::Deleted(x - 1)));
-                    xy.0 -= 1;
-                } else {
-                    unreachable!("Failed to select correct path. This should never happen.");
-                }
-            }
+            self.set_current_type(edit_type);
         }
     }
-    (
-        range_counter.count,
-        edits,
-    )
 }
 
 pub struct EditScript {
@@ -455,6 +430,14 @@ pub struct EditScript {
 }
 
 impl EditScript {
+    #[inline]
+    const fn new(range_count: usize, edits: Vec<Edit>) -> Self {
+        Self {
+            range_count,
+            edits,
+        }
+    }
+
     #[inline]
     pub fn edits(&self) -> &[Edit] {
         self.edits.as_slice()
@@ -481,26 +464,112 @@ impl EditScript {
     }
 }
 
-/// Returns (range_count, edit_script)
-pub fn diff<T: PartialEq<T>>(old: &[T], new: &[T]) -> EditScript {
-    let (range_count, mut edits) = reverse_diff(old, new);
-    edits.reverse();
-    EditScript {
-        range_count,
-        edits,
+/// Edit scripts are built in reverse order in the algorithm, and the number of edits is
+/// known beforehand, so we can utilize these properties to create a backwards filling
+/// script builder.
+struct EditScriptBuilder {
+    script: Box<[MaybeUninit<Edit>]>,
+    index: usize,
+    range_counter: EditRangeCounter,
+}
+
+impl EditScriptBuilder {
+    fn new(capacity: usize) -> Self {
+        Self {
+            script: Box::new_uninit_slice(capacity),
+            index: capacity,
+            range_counter: EditRangeCounter::new(),
+        }
+    }
+
+    fn push(&mut self, edit: Edit) {
+        debug_assert_ne!(self.index, 0, "Overflow.");
+        let index = self.index - 1;
+        self.index = index;
+        self.range_counter.record(edit.edit_type());
+        self.script[index] = MaybeUninit::new(edit);
+    }
+
+    fn finish(self) -> EditScript {
+        debug_assert_eq!(self.index, 0);
+        EditScript {
+            range_count: self.range_counter.count,
+            edits: unsafe {
+                Vec::from(self.script.assume_init())
+            },
+        }
     }
 }
 
+pub fn diff<'a, T: PartialEq<T>>(old: &'a [T], new: &'a [T]) -> EditScript {
+    match (old.len(), new.len()) {
+        (0, 0) => {
+            return EditScript::new(0, Vec::new());
+        }
+        (0, len) => {
+            return EditScript::new(1, (0..len).map(|i| Edit::Inserted(i)).collect());
+        }
+        (len, 0) => {
+            return EditScript::new(1, (0..len).map(|i| Edit::Deleted(i)).collect());
+        }
+        (old_len, new_len) if old_len == new_len && old == new => {
+            return EditScript::new(1, (0..old_len).map(|i| Edit::Unchanged(i)).collect());
+        }
+        _ => (),
+    }
+    let (script_len, table) = EditTable::build(old, new);
+    let mut script_builder = EditScriptBuilder::new(script_len);
+    let mut xy = (old.len(), new.len());
+    loop {
+        match xy {
+            (0, 0) => break,
+            (0, mut y) => {
+                while y != 0 {
+                    script_builder.push(Edit::Inserted(y - 1));
+                    y -= 1;
+                }
+                break;
+            }
+            (mut x, 0) => {
+                while x != 0 {
+                    script_builder.push(Edit::Deleted(x - 1));
+                    x -= 1;
+                }
+                break;
+            }
+            (x, y) => {
+                let curr = table.get(x, y);
+                if table.compare(x, y)
+                && curr == table.get(x - 1, y - 1) {
+                    script_builder.push(Edit::Unchanged(x - 1));
+                    xy = (x - 1, y - 1);
+                } else if curr == table.get(x, y - 1) + 1 {
+                    script_builder.push(Edit::Inserted(y - 1));
+                    xy.1 -= 1;
+                } else if curr == table.get(x - 1, y) + 1 {
+                    script_builder.push(Edit::Deleted(x - 1));
+                    xy.0 -= 1;
+                } else {
+                    unreachable!("Failed to select correct path. This should never happen.");
+                }
+            }
+        }
+    }
+    script_builder.finish()
+}
+
 pub fn diff_ranges<T: PartialEq<T>>(old: &[T], new: &[T]) -> Vec<EditRange> {
-    let (range_count, mut edits) = reverse_diff(old, new);
-    if edits.is_empty() {
-        return Vec::new();
+    match (old.len(), new.len()) {
+        (0, 0) => return vec![],
+        (0, len) => return vec![EditRange::Inserted(0, len)],
+        (len, 0) => return vec![EditRange::Deleted(0, len)],
+        (old_len, new_len) if old_len == new_len && old == new => {
+            return vec![EditRange::Unchanged(0, old_len)];
+        }
+        _ => (),
     }
-    let mut builder = DiffRangesBuilder::new(range_count);
-    while let Some(edit) = edits.pop() {
-        builder.push(edit);
-    }
-    builder.finalize()
+    let edit_script = diff(old, new);
+    edit_script.range_script()
 }
 
 #[cfg(test)]
@@ -539,7 +608,7 @@ mod tests {
 
     #[test]
     fn diff_test() {
-        let seq_a = &[
+        let seq_a: &[&str] = &[
             "Hello, World!",
             "The quick brown fox jumps over the lazy dog.",
             "Foo",
@@ -548,7 +617,7 @@ mod tests {
             "Baz",
             "Test",
         ];
-        let seq_b = &[
+        let seq_b: &[&str] = &[
             "hello world",
             "The quick brown fox jumps over the lazy dog.",
             "Bar",
@@ -557,7 +626,6 @@ mod tests {
             "Bar",
             "Baz",
         ];
-        assert_ne!(seq_a.as_slice(), seq_b.as_slice());
         let edit_script = diff(seq_a, seq_b);
         assert_eq!(edit_script.edits.len(), edit_script.edits.capacity());
         let edit_ranges = diff_ranges(seq_a, seq_b);
@@ -566,16 +634,6 @@ mod tests {
         assert_eq!(ranges_script.len(), ranges_script.capacity());
         assert_eq!(edit_ranges, ranges_script);
         let edits = edit_script.take_edits();
-        // let edit_ranges = diff_ranges(seq_a, seq_b);
-        // println!("Old: \"{seq_a}\"\nNew: \"{seq_b}\"");
-        // println!("--------------------------------");
-        // for range in edit_ranges {
-        //     match range {
-        //         EditRange::Deleted(start, end) => println!("-{}", &seq_a[start..end]),
-        //         EditRange::Inserted(start, end) => println!("+{}", &seq_b[start..end]),
-        //         EditRange::Unchanged(start, end) => println!("={}", &seq_b[start..end]),
-        //     }
-        // }
         println!("--------------------------------");
         for edit in edits {
             match edit {
