@@ -9,8 +9,9 @@ use std::mem::MaybeUninit;
 /// are `(x, x)`, `(x - 1, y)`, `(x, y - 1)`, or `(x - 1, y - 1)`.
 struct EditLenTracker {
     rows: [Vec<usize>; 2],
-    /// The indices into `rows`.
-    indices: [usize; 2],
+    /// The `index` determines which row is (virtually) `row[0]` and which is `row[1]`.
+    /// If `index` is `0`, then `0 = 0` and `1 = 1`, if `index` is `1`, `0 = 1` and `1 = 0`.
+    index: usize,
     y: usize,
     /// After the table is built, this value should store the last length (which should be the bottom-right).
     /// If this value represents the value at the bottom-right, that means that this is the final edit script's length.
@@ -18,58 +19,57 @@ struct EditLenTracker {
 }
 
 impl EditLenTracker {
-    fn new(width: usize, y: usize) -> Self {
+    fn new(width: usize) -> Self {
         Self {
-            y,
+            y: 0,
             last_len: 0,
-            indices: [0, 1],
+            index: 0,
             rows: [
-                Vec::from_iter((0..width).map(|_| 0)),
-                Vec::from_iter((0..width).map(|_| 0)),
+                Vec::from_iter((0..width - 1).map(|_| 0)),
+                Vec::from_iter((0..width - 1).map(|_| 0)),
             ]
         }
     }
 
+    #[inline]
     fn next_row(&mut self) {
-        // Since indices is either [0, 1] or [1, 0],
-        // we can XOR both of them by 1, which has the same effect as swapping them.
-        self.indices[0] ^= 1;
-        self.indices[1] ^= 1;
+        self.index ^= 1;
         self.y += 1;
     }
 
-    fn get(&self, x: usize, y: usize) -> usize {
+    #[inline]
+    fn index_of(&self, y: usize) -> usize {
+        debug_assert!(y >= self.y && y < self.y + 2, "y={y} is out of range.");
+        let index = y - self.y;
+        // 0 ^ 0 = 0
+        // 1 ^ 0 = 1
+        // 0 ^ 1 = 1
+        // 1 ^ 1 = 0
+        self.index ^ index
+    }
+
+    fn get_len(&self, x: usize, y: usize) -> usize {
         match (x, y) {
             (0, 0) => 0,
             (0, y) => y,
             (x, 0) => x,
             (x, y) => {
-                let Some(index_index) = y.checked_sub(self.y) else {
-                    // The reason this should be unreachable is because the EditLenTracker
-                    // is not public, and I intend to not use it in an erroneous way.
-                    // This will tell me if I've used it wrong.
-                    unreachable!("y={y} is out of range. This should be unreachable.");
-                };
-                debug_assert!(index_index < 2, "y={y} is out of range.");
-                let index = self.indices[index_index];
-                self.rows[index][x]
+                let row = self.index_of(y);
+                self.rows[row][x - 1]
             }
         }
     }
 
-    fn set(&mut self, x: usize, y: usize, value: usize) {
+    fn set_len(&mut self, x: usize, y: usize, value: usize) {
         match (x, y) {
             (0, 0) => (),
             (0, _y) => (),
             (_x, 0) => (),
             (x, y) => {
-                let Some(index_index) = y.checked_sub(self.y) else {
-                    panic!("y={y} is out of range.");
-                };
-                debug_assert!(index_index < 2, "y={y} is out of range.");
-                let index = self.indices[index_index];
+                let row = self.index_of(y);
+                // The last value set to last_len will be the value at the bottom-right corner.
                 self.last_len = value;
-                self.rows[index][x] = value;
+                self.rows[row][x - 1] = value;
             }
         }
     }
@@ -84,164 +84,150 @@ pub enum EditType {
 }
 
 #[repr(u8)]
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum Edit {
-    /// usize is index in `old` that was deleted.
-    Deleted(usize) = 0,
-    /// usize is index in `new` that was inserted.
-    Inserted(usize) = 1,
-    /// usize is index in `old` that is unchanged.
-    Unchanged(usize) = 2,
+#[derive(Debug)]
+pub enum Edit<T> {
+    Deleted(T) = 0,
+    Inserted(T) = 1,
+    Unchanged(T) = 2,
 }
 
-impl Edit {
+impl<T> Edit<T> {
     #[inline]
-    pub const fn select<'a, T>(self, old: &'a [T], new: &'a [T]) -> &'a T {
+    pub fn map<R, F: FnOnce(T) -> R>(self, f: F) -> Edit<R> {
         match self {
-            Edit::Deleted(index) => &old[index],
-            Edit::Inserted(index) => &new[index],
-            Edit::Unchanged(index) => &old[index],
+            Edit::Deleted(value) => Edit::Deleted(f(value)),
+            Edit::Inserted(value) => Edit::Inserted(f(value)),
+            Edit::Unchanged(value) => Edit::Unchanged(f(value)),
         }
     }
 
     #[inline]
-    pub const fn select_mut<'a, T>(self, old: &'a mut [T], new: &'a mut [T]) -> &'a mut T {
-        match self {
-            Edit::Deleted(index) => &mut old[index],
-            Edit::Inserted(index) => &mut new[index],
-            Edit::Unchanged(index) => &mut old[index],
-        }
-    }
-
-    #[inline]
-    pub const fn edit_type(self) -> EditType {
+    pub const fn edit_type(&self) -> EditType {
         match self {
             Edit::Deleted(_) => EditType::Deleted,
             Edit::Inserted(_) => EditType::Inserted,
             Edit::Unchanged(_) => EditType::Unchanged,
         }
     }
-}
-
-#[repr(u8)]
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum EditRange {
-    /// (start, end)
-    Deleted(usize, usize) = 0,
-    /// (start, end)
-    Inserted(usize, usize) = 1,
-    /// (start end)
-    Unchanged(usize, usize) = 2,
-}
-
-impl EditRange {
-    pub const fn start_from_edit(edit: Edit) -> Self {
-        match edit {
-            Edit::Deleted(index) => Self::Deleted(index, index + 1),
-            Edit::Inserted(index) => Self::Inserted(index, index + 1),
-            Edit::Unchanged(index) => Self::Unchanged(index, index + 1),
-        }
-    }
-
-    pub const fn range(self) -> std::ops::Range<usize> {
-        match self {
-            EditRange::Deleted(start, end) => start..end,
-            EditRange::Inserted(start, end) => start..end,
-            EditRange::Unchanged(start, end) => start..end,
-        }
-    }
-
-    pub fn select<'a, T>(self, old: &'a [T], new: &'a [T]) -> &'a [T] {
-        match self {
-            EditRange::Deleted(start, end) => &old[start..end],
-            EditRange::Inserted(start, end) => &new[start..end],
-            EditRange::Unchanged(start, end) => &old[start..end],
-        }
-    }
-
-    pub fn select_mut<'a, T>(self, old: &'a mut [T], new: &'a mut [T]) -> &'a mut [T] {
-        match self {
-            EditRange::Deleted(start, end) => &mut old[start..end],
-            EditRange::Inserted(start, end) => &mut new[start..end],
-            EditRange::Unchanged(start, end) => &mut old[start..end],
-        }
-    }
 
     #[inline]
-    pub const fn edit_type(self) -> EditType {
-        match self {
-            EditRange::Deleted(_, _) => EditType::Deleted,
-            EditRange::Inserted(_, _) => EditType::Inserted,
-            EditRange::Unchanged(_, _) => EditType::Unchanged,
+    pub fn is_type(&self, edit_type: EditType) -> bool {
+        match (self, edit_type) {
+            (Edit::Deleted(_), EditType::Deleted) => true,
+            (Edit::Inserted(_), EditType::Inserted) => true,
+            (Edit::Unchanged(_), EditType::Unchanged) => true,
+            _ => false,
         }
     }
 }
 
-#[derive(Debug)]
-pub enum EditValue<T> {
-    Deleted(T),
-    Inserted(T),
-    Unchanged(T),
-}
-
-impl<T> EditValue<T> {
-    pub fn map<R, F: FnOnce(T) -> R>(self, f: F) -> EditValue<R> {
-        match self {
-            EditValue::Deleted(value) => EditValue::Deleted(f(value)),
-            EditValue::Inserted(value) => EditValue::Inserted(f(value)),
-            EditValue::Unchanged(value) => EditValue::Unchanged(f(value)),
-        }
-    }
-
-    pub fn edit_type(&self) -> EditType {
-        match self {
-            EditValue::Deleted(_) => EditType::Deleted,
-            EditValue::Inserted(_) => EditType::Inserted,
-            EditValue::Unchanged(_) => EditType::Unchanged,
-        }
-    }
-}
-
-impl<T: Clone> Clone for EditValue<T> {
+impl<T: Clone> Clone for Edit<T> {
     fn clone(&self) -> Self {
         match self {
-            EditValue::Deleted(value) => EditValue::Deleted(value.clone()),
-            EditValue::Inserted(value) => EditValue::Inserted(value.clone()),
-            EditValue::Unchanged(value) => EditValue::Unchanged(value.clone()),
+            Edit::Deleted(value) => Edit::Deleted(value.clone()),
+            Edit::Inserted(value) => Edit::Inserted(value.clone()),
+            Edit::Unchanged(value) => Edit::Unchanged(value.clone()),
         }
     }
 }
 
-impl<T: Copy> Copy for EditValue<T> {}
+impl<T: Copy> Copy for Edit<T> {}
 
-impl<T: PartialEq<T>> PartialEq<Self> for EditValue<T> {
+impl<T: PartialEq<T>> PartialEq<Self> for Edit<T> {
     fn eq(&self, other: &Self) -> bool {
         match (self, other) {
-            (EditValue::Deleted(lhs), EditValue::Deleted(rhs)) => lhs == rhs,
-            (EditValue::Inserted(lhs), EditValue::Inserted(rhs)) => lhs == rhs,
-            (EditValue::Unchanged(lhs), EditValue::Unchanged(rhs)) => lhs == rhs,
+            (Edit::Deleted(lhs), Edit::Deleted(rhs)) => lhs == rhs,
+            (Edit::Inserted(lhs), Edit::Inserted(rhs)) => lhs == rhs,
+            (Edit::Unchanged(lhs), Edit::Unchanged(rhs)) => lhs == rhs,
             _ => false,
         }
     }
 
     fn ne(&self, other: &Self) -> bool {
         match (self, other) {
-            (EditValue::Deleted(lhs), EditValue::Deleted(rhs)) => lhs != rhs,
-            (EditValue::Inserted(lhs), EditValue::Inserted(rhs)) => lhs != rhs,
-            (EditValue::Unchanged(lhs), EditValue::Unchanged(rhs)) => lhs != rhs,
+            (Edit::Deleted(lhs), Edit::Deleted(rhs)) => lhs != rhs,
+            (Edit::Inserted(lhs), Edit::Inserted(rhs)) => lhs != rhs,
+            (Edit::Unchanged(lhs), Edit::Unchanged(rhs)) => lhs != rhs,
             _ => true,
         }
     }
 }
 
-impl<T: Eq> Eq for EditValue<T> {}
+impl<T: Eq> Eq for Edit<T> {}
 
-impl<T: std::hash::Hash> std::hash::Hash for EditValue<T> {
+impl<T: std::hash::Hash> std::hash::Hash for Edit<T> {
     fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
         match self {
-            EditValue::Deleted(value) => value.hash(state),
-            EditValue::Inserted(value) => value.hash(state),
-            EditValue::Unchanged(value) => value.hash(state),
+            Edit::Deleted(value) => value.hash(state),
+            Edit::Inserted(value) => value.hash(state),
+            Edit::Unchanged(value) => value.hash(state),
+        }
+    }
+}
+
+pub type EditIndex = Edit<usize>;
+pub type EditRange = Edit<(usize, usize)>;
+
+impl EditIndex {
+    #[inline]
+    pub const fn select<'a, T>(self, old: &'a [T], new: &'a [T]) -> &'a T {
+        match self {
+            EditIndex::Deleted(index) => &old[index],
+            EditIndex::Inserted(index) => &new[index],
+            EditIndex::Unchanged(index) => &old[index],
+        }
+    }
+
+    #[inline]
+    pub const fn select_mut<'a, T>(self, old: &'a mut [T], new: &'a mut [T]) -> &'a mut T {
+        match self {
+            EditIndex::Deleted(index) => &mut old[index],
+            EditIndex::Inserted(index) => &mut new[index],
+            EditIndex::Unchanged(index) => &mut old[index],
+        }
+    }
+
+    #[inline]
+    pub const fn index(self) -> usize {
+        match self {
+            Edit::Deleted(index) => index,
+            Edit::Inserted(index) => index,
+            Edit::Unchanged(index) => index,
+        }
+    }
+
+    /// Creates a range that starts at `index` and has a length of `1`.
+    #[inline]
+    pub fn range_start(self) -> EditRange {
+        self.map(|index| (index, index + 1))
+    }
+}
+
+impl EditRange {
+    #[inline]
+    pub const fn range(self) -> std::ops::Range<usize> {
+        match self {
+            EditRange::Deleted((start, end)) => start..end,
+            EditRange::Inserted((start, end)) => start..end,
+            EditRange::Unchanged((start, end)) => start..end,
+        }
+    }
+
+    #[inline]
+    pub fn select<'a, T>(self, old: &'a [T], new: &'a [T]) -> &'a [T] {
+        match self {
+            EditRange::Deleted((start, end)) => &old[start..end],
+            EditRange::Inserted((start, end)) => &new[start..end],
+            EditRange::Unchanged((start, end)) => &old[start..end],
+        }
+    }
+
+    #[inline]
+    pub fn select_mut<'a, T>(self, old: &'a mut [T], new: &'a mut [T]) -> &'a mut [T] {
+        match self {
+            EditRange::Deleted((start, end)) => &mut old[start..end],
+            EditRange::Inserted((start, end)) => &mut new[start..end],
+            EditRange::Unchanged((start, end)) => &mut old[start..end],
         }
     }
 }
@@ -289,7 +275,7 @@ impl<'a, T: PartialEq<T>> EditTable<'a, T> {
         ((y - 1) * (self.width - 1)) + (x - 1)
     }
 
-    fn get(&self, x: usize, y: usize) -> usize {
+    fn get_len(&self, x: usize, y: usize) -> usize {
         match (x, y) {
             (0, 0) => 0,
             (0, y) => y,
@@ -301,7 +287,7 @@ impl<'a, T: PartialEq<T>> EditTable<'a, T> {
         }
     }
 
-    fn set(&mut self, x: usize, y: usize, value: usize) {
+    fn set_len(&mut self, x: usize, y: usize, value: usize) {
         match (x, y) {
             // If you get this `unreachable` panic, that means that you tried to
             // set a value in a row/column that doesn't exist. You can't set values at x==0 || y == 0.
@@ -317,22 +303,22 @@ impl<'a, T: PartialEq<T>> EditTable<'a, T> {
     /// Returns (edit_script_length, EditTable).
     fn build(old: &'a [T], new: &'a [T]) -> (usize, Self) {
         let mut table = EditTable::new(old, new);
-        let mut len_tracker = EditLenTracker::new(table.width, 0);
+        let mut len_tracker = EditLenTracker::new(table.width);
         for y in 1..new.len() + 1 {
             for x in 1..old.len() + 1 {
                 if table.compare(x, y) {
-                    table.set(x, y, table.get(x - 1, y - 1));
-                    len_tracker.set(x, y, len_tracker.get(x - 1, y - 1) + 1);
+                    table.set_len(x, y, table.get_len(x - 1, y - 1));
+                    len_tracker.set_len(x, y, len_tracker.get_len(x - 1, y - 1) + 1);
                 } else {
-                    let top = table.get(x, y - 1);
-                    let left = table.get(x - 1, y);
+                    let top = table.get_len(x, y - 1);
+                    let left = table.get_len(x - 1, y);
                     let (dp, len) = if top <= left {
-                        (top, len_tracker.get(x, y - 1))
+                        (top, len_tracker.get_len(x, y - 1))
                     } else {
-                        (left, len_tracker.get(x - 1, y))
+                        (left, len_tracker.get_len(x - 1, y))
                     };
-                    table.set(x, y, dp + 1);
-                    len_tracker.set(x, y, len + 1);
+                    table.set_len(x, y, dp + 1);
+                    len_tracker.set_len(x, y, len + 1);
                 }
             }
             len_tracker.next_row();
@@ -354,31 +340,31 @@ impl DiffRangesBuilder {
         }
     }
 
-    fn push(&mut self, edit: Edit) {
+    fn push(&mut self, edit: EditIndex) {
         self.current = Some(match (self.current, edit) {
-            (Some(EditRange::Unchanged(start, end)), Edit::Unchanged(index)) => {
+            (Some(EditRange::Unchanged((start, end))), EditIndex::Unchanged(index)) => {
                 debug_assert_eq!(end, index, "end does not match index");
-                EditRange::Unchanged(start, end + 1)
+                EditRange::Unchanged((start, end + 1))
             }
-            (Some(EditRange::Inserted(start, end)), Edit::Inserted(index)) => {
+            (Some(EditRange::Inserted((start, end))), EditIndex::Inserted(index)) => {
                 debug_assert_eq!(end, index, "end does not match index");
-                EditRange::Inserted(start, end + 1)
+                EditRange::Inserted((start, end + 1))
             }
-            (Some(EditRange::Deleted(start, end)), Edit::Deleted(index)) => {
+            (Some(EditRange::Deleted((start, end))), EditIndex::Deleted(index)) => {
                 debug_assert_eq!(end, index, "end does not match index");
-                EditRange::Deleted(start, end + 1)
+                EditRange::Deleted((start, end + 1))
             }
             (Some(range), edit) => {
                 self.ranges.push(range);
-                EditRange::start_from_edit(edit)
+                edit.range_start()
             }
             (None, edit) => {
-                EditRange::start_from_edit(edit)
+                edit.range_start()
             }
         });
     }
 
-    fn finalize(self) -> Vec<EditRange> {
+    fn finish(self) -> Vec<EditRange> {
         let Self {
             current,
             mut ranges,
@@ -403,35 +389,23 @@ impl EditRangeCounter {
         }
     }
 
-    /// Sets the current type and increases the count by `1`.
     #[inline]
-    fn set_current_type(&mut self, edit_type: EditType) {
-        self.count += 1;
-        self.current_type = Some(edit_type);
-    }
-
-    /// Works as a pass through. It determines whether to increase the count
-    /// based on the input value, then returns the input value untouched.
-    #[inline]
-    fn record(&mut self, edit_type: EditType) {
-        if let Some(current_type) = self.current_type {
-            if current_type != edit_type {
-                self.set_current_type(edit_type);
-            }
-        } else {
-            self.set_current_type(edit_type);
+    fn push(&mut self, edit_type: EditType) {
+        if self.current_type != Some(edit_type) {
+            self.count += 1;
+            self.current_type = Some(edit_type);
         }
     }
 }
 
 pub struct EditScript {
     range_count: usize,
-    edits: Vec<Edit>,
+    edits: Vec<EditIndex>,
 }
 
 impl EditScript {
     #[inline]
-    const fn new(range_count: usize, edits: Vec<Edit>) -> Self {
+    const fn new(range_count: usize, edits: Vec<EditIndex>) -> Self {
         Self {
             range_count,
             edits,
@@ -439,7 +413,7 @@ impl EditScript {
     }
 
     #[inline]
-    pub fn edits(&self) -> &[Edit] {
+    pub fn edits(&self) -> &[EditIndex] {
         self.edits.as_slice()
     }
 
@@ -451,7 +425,7 @@ impl EditScript {
     }
 
     #[inline]
-    pub fn take_edits(self) -> Vec<Edit> {
+    pub fn take_edits(self) -> Vec<EditIndex> {
         self.edits
     }
 
@@ -460,7 +434,19 @@ impl EditScript {
         for edit in self.edits.iter().cloned() {
             builder.push(edit);
         }
-        builder.finalize()
+        builder.finish()
+    }
+
+    pub fn iter(&self) -> std::iter::Cloned<std::slice::Iter<'_, EditIndex>> {
+        self.edits.iter().cloned()
+    }
+}
+
+impl IntoIterator for EditScript {
+    type Item = EditIndex;
+    type IntoIter = <Vec::<EditIndex> as IntoIterator>::IntoIter;
+    fn into_iter(self) -> Self::IntoIter {
+        self.edits.into_iter()
     }
 }
 
@@ -468,7 +454,7 @@ impl EditScript {
 /// known beforehand, so we can utilize these properties to create a backwards filling
 /// script builder.
 struct EditScriptBuilder {
-    script: Box<[MaybeUninit<Edit>]>,
+    script: Box<[MaybeUninit<EditIndex>]>,
     index: usize,
     range_counter: EditRangeCounter,
 }
@@ -482,19 +468,21 @@ impl EditScriptBuilder {
         }
     }
 
-    fn push(&mut self, edit: Edit) {
+    fn push(&mut self, edit: EditIndex) {
         debug_assert_ne!(self.index, 0, "Overflow.");
         let index = self.index - 1;
         self.index = index;
-        self.range_counter.record(edit.edit_type());
+        self.range_counter.push(edit.edit_type());
         self.script[index] = MaybeUninit::new(edit);
     }
 
     fn finish(self) -> EditScript {
-        debug_assert_eq!(self.index, 0);
+        debug_assert_eq!(self.index, 0, "Buffer was not fully initialized before calling .finish()");
         EditScript {
             range_count: self.range_counter.count,
             edits: unsafe {
+                // So long as the entire script has been initialized, this should be safe.
+                // The EditScript construct should only be used in places where this can be guaranteed.
                 Vec::from(self.script.assume_init())
             },
         }
@@ -507,13 +495,13 @@ pub fn diff<'a, T: PartialEq<T>>(old: &'a [T], new: &'a [T]) -> EditScript {
             return EditScript::new(0, Vec::new());
         }
         (0, len) => {
-            return EditScript::new(1, (0..len).map(|i| Edit::Inserted(i)).collect());
+            return EditScript::new(1, (0..len).map(|i| EditIndex::Inserted(i)).collect());
         }
         (len, 0) => {
-            return EditScript::new(1, (0..len).map(|i| Edit::Deleted(i)).collect());
+            return EditScript::new(1, (0..len).map(|i| EditIndex::Deleted(i)).collect());
         }
         (old_len, new_len) if old_len == new_len && old == new => {
-            return EditScript::new(1, (0..old_len).map(|i| Edit::Unchanged(i)).collect());
+            return EditScript::new(1, (0..old_len).map(|i| EditIndex::Unchanged(i)).collect());
         }
         _ => (),
     }
@@ -525,29 +513,29 @@ pub fn diff<'a, T: PartialEq<T>>(old: &'a [T], new: &'a [T]) -> EditScript {
             (0, 0) => break,
             (0, mut y) => {
                 while y != 0 {
-                    script_builder.push(Edit::Inserted(y - 1));
+                    script_builder.push(EditIndex::Inserted(y - 1));
                     y -= 1;
                 }
                 break;
             }
             (mut x, 0) => {
                 while x != 0 {
-                    script_builder.push(Edit::Deleted(x - 1));
+                    script_builder.push(EditIndex::Deleted(x - 1));
                     x -= 1;
                 }
                 break;
             }
             (x, y) => {
-                let curr = table.get(x, y);
+                let curr = table.get_len(x, y);
                 if table.compare(x, y)
-                && curr == table.get(x - 1, y - 1) {
-                    script_builder.push(Edit::Unchanged(x - 1));
+                && curr == table.get_len(x - 1, y - 1) {
+                    script_builder.push(EditIndex::Unchanged(x - 1));
                     xy = (x - 1, y - 1);
-                } else if curr == table.get(x, y - 1) + 1 {
-                    script_builder.push(Edit::Inserted(y - 1));
+                } else if curr == table.get_len(x, y - 1) + 1 {
+                    script_builder.push(EditIndex::Inserted(y - 1));
                     xy.1 -= 1;
-                } else if curr == table.get(x - 1, y) + 1 {
-                    script_builder.push(Edit::Deleted(x - 1));
+                } else if curr == table.get_len(x - 1, y) + 1 {
+                    script_builder.push(EditIndex::Deleted(x - 1));
                     xy.0 -= 1;
                 } else {
                     unreachable!("Failed to select correct path. This should never happen.");
@@ -561,10 +549,10 @@ pub fn diff<'a, T: PartialEq<T>>(old: &'a [T], new: &'a [T]) -> EditScript {
 pub fn diff_ranges<T: PartialEq<T>>(old: &[T], new: &[T]) -> Vec<EditRange> {
     match (old.len(), new.len()) {
         (0, 0) => return vec![],
-        (0, len) => return vec![EditRange::Inserted(0, len)],
-        (len, 0) => return vec![EditRange::Deleted(0, len)],
+        (0, len) => return vec![EditRange::Inserted((0, len))],
+        (len, 0) => return vec![EditRange::Deleted((0, len))],
         (old_len, new_len) if old_len == new_len && old == new => {
-            return vec![EditRange::Unchanged(0, old_len)];
+            return vec![EditRange::Unchanged((0, old_len))];
         }
         _ => (),
     }
@@ -578,11 +566,11 @@ mod tests {
 
     #[test]
     fn edit_value_map() {
-        let value = EditValue::Inserted(0u32);
+        let value = Edit::Inserted(0u32);
         let value = value.map(|value| {
             value..value + 1
         });
-        assert_eq!(value, EditValue::Inserted(0..1));
+        assert_eq!(value, Edit::Inserted(0..1));
     }
 
     #[test]
@@ -637,27 +625,27 @@ mod tests {
         println!("--------------------------------");
         for edit in edits {
             match edit {
-                Edit::Deleted(index) => println!("-{}", seq_a[index]),
-                Edit::Inserted(index) => println!("+{}", seq_b[index]),
-                Edit::Unchanged(index) => println!("={}", seq_a[index]),
+                EditIndex::Deleted(index) => println!("-{}", seq_a[index]),
+                EditIndex::Inserted(index) => println!("+{}", seq_b[index]),
+                EditIndex::Unchanged(index) => println!("={}", seq_a[index]),
             }
         }
         println!("--------------------------------");
         for range in edit_ranges {
             let (prefix, slice) = match range {
-                EditRange::Deleted(start, end) => {
+                EditRange::Deleted((start, end)) => {
                     (
                         '-',
                         &seq_a[start..end],
                     )
                 },
-                EditRange::Inserted(start, end) => {
+                EditRange::Inserted((start, end)) => {
                     (
                         '+',
                         &seq_b[start..end],
                     )
                 },
-                EditRange::Unchanged(start, end) => {
+                EditRange::Unchanged((start, end)) => {
                     (
                         '=',
                         &seq_a[start..end],
