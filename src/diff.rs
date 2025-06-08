@@ -429,7 +429,8 @@ impl EditScript {
         self.edits
     }
 
-    pub fn range_script(&self) -> Vec<EditRange> {
+    /// Builds a new [EditRange] script.
+    pub fn build_range_script(&self) -> Vec<EditRange> {
         let mut builder = DiffRangesBuilder::new(self.range_count);
         for edit in self.edits.iter().cloned() {
             builder.push(edit);
@@ -556,8 +557,7 @@ pub fn diff_ranges<T: PartialEq<T>>(old: &[T], new: &[T]) -> Vec<EditRange> {
         }
         _ => (),
     }
-    let edit_script = diff(old, new);
-    edit_script.range_script()
+    diff(old, new).build_range_script()
 }
 
 #[cfg(test)]
@@ -618,7 +618,7 @@ mod tests {
         assert_eq!(edit_script.edits.len(), edit_script.edits.capacity());
         let edit_ranges = diff_ranges(seq_a, seq_b);
         assert_eq!(edit_ranges.len(), edit_ranges.capacity());
-        let ranges_script = edit_script.range_script();
+        let ranges_script = edit_script.build_range_script();
         assert_eq!(ranges_script.len(), ranges_script.capacity());
         assert_eq!(edit_ranges, ranges_script);
         let edits = edit_script.take_edits();
