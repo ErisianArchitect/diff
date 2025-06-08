@@ -342,9 +342,6 @@ impl DiffRangesBuilder {
 
     fn push(&mut self, edit: EditIndex) {
         self.current = Some(match (self.current, edit) {
-            (None, edit) => {
-                edit.range_start()
-            }
             (Some(EditRange::Unchanged((start, end))), EditIndex::Unchanged(index)) => {
                 debug_assert_eq!(end, index, "end does not match index");
                 EditRange::Unchanged((start, end + 1))
@@ -356,6 +353,9 @@ impl DiffRangesBuilder {
             (Some(EditRange::Deleted((start, end))), EditIndex::Deleted(index)) => {
                 debug_assert_eq!(end, index, "end does not match index");
                 EditRange::Deleted((start, end + 1))
+            }
+            (None, edit) => {
+                edit.range_start()
             }
             (Some(range), edit) => {
                 self.ranges.push(range);
