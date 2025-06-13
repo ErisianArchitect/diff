@@ -190,7 +190,7 @@ impl EditLenTracker {
     }
 
     #[inline]
-    fn index_of(&self, y: usize) -> usize {
+    fn index_of_row(&self, y: usize) -> usize {
         debug_assert!(y >= self.y && y < self.y + 2, "y={y} is out of range.");
         let index = y - self.y;
         // 0 ^ 0 = 0
@@ -206,7 +206,7 @@ impl EditLenTracker {
             (0, y) => y,
             (x, 0) => x,
             (x, y) => {
-                let row = self.index_of(y);
+                let row = self.index_of_row(y);
                 self.rows[row][x - 1]
             }
         }
@@ -218,7 +218,7 @@ impl EditLenTracker {
             (0, _y) => (),
             (_x, 0) => (),
             (x, y) => {
-                let row = self.index_of(y);
+                let row = self.index_of_row(y);
                 self.rows[row][x - 1] = value;
             }
         }
