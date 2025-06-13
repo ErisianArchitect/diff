@@ -263,6 +263,7 @@ impl<'a, T: PartialEq<T>> EditTable<'a, T> {
         }
     }
 
+    #[inline]
     fn index_at(&self, x: usize, y: usize) -> usize {
         debug_assert!(x < self.width && y < self.height);
         ((y - 1) * (self.width - 1)) + (x - 1)
