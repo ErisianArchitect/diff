@@ -1,74 +1,5 @@
 use std::mem::MaybeUninit;
 
-
-/// Stores only two rows at a time. Keeps track of the minimum
-/// edit script length as the table is built.
-/// This makes it possible to calculate the edit script length while building the
-/// edit distance table without allocating an entire table for the edit lengths.
-/// This utilizes the fact that the only possible cells that will be checked
-/// are `(x, x)`, `(x - 1, y)`, `(x, y - 1)`, or `(x - 1, y - 1)`.
-struct EditLenTracker {
-    rows: [Vec<usize>; 2],
-    /// The `index` determines which row is (virtually) `row[0]` and which is `row[1]`.
-    /// If `index` is `0`, then `0 = 0` and `1 = 1`, if `index` is `1`, `0 = 1` and `1 = 0`.
-    index: usize,
-    y: usize,
-}
-
-impl EditLenTracker {
-    fn new(width: usize) -> Self {
-        Self {
-            y: 0,
-            index: 0,
-            rows: [
-                Vec::from_iter((0..width - 1).map(|_| 0)),
-                Vec::from_iter((0..width - 1).map(|_| 0)),
-            ]
-        }
-    }
-
-    #[inline]
-    fn next_row(&mut self) {
-        self.index ^= 1;
-        self.y += 1;
-    }
-
-    #[inline]
-    fn index_of(&self, y: usize) -> usize {
-        debug_assert!(y >= self.y && y < self.y + 2, "y={y} is out of range.");
-        let index = y - self.y;
-        // 0 ^ 0 = 0
-        // 1 ^ 0 = 1
-        // 0 ^ 1 = 1
-        // 1 ^ 1 = 0
-        self.index ^ index
-    }
-
-    fn get_len(&self, x: usize, y: usize) -> usize {
-        match (x, y) {
-            (0, 0) => 0,
-            (0, y) => y,
-            (x, 0) => x,
-            (x, y) => {
-                let row = self.index_of(y);
-                self.rows[row][x - 1]
-            }
-        }
-    }
-
-    fn set_len(&mut self, x: usize, y: usize, value: usize) {
-        match (x, y) {
-            (0, 0) => (),
-            (0, _y) => (),
-            (_x, 0) => (),
-            (x, y) => {
-                let row = self.index_of(y);
-                self.rows[row][x - 1] = value;
-            }
-        }
-    }
-}
-
 #[repr(u8)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum EditType {
@@ -222,6 +153,74 @@ impl EditRange {
             EditRange::Deleted((start, end)) => &mut old[start..end],
             EditRange::Inserted((start, end)) => &mut new[start..end],
             EditRange::Unchanged((start, end)) => &mut old[start..end],
+        }
+    }
+}
+
+/// Stores only two rows at a time. Keeps track of the minimum
+/// edit script length as the table is built.
+/// This makes it possible to calculate the edit script length while building the
+/// edit distance table without allocating an entire table for the edit lengths.
+/// This utilizes the fact that the only possible cells that will be checked
+/// are `(x, x)`, `(x - 1, y)`, `(x, y - 1)`, or `(x - 1, y - 1)`.
+struct EditLenTracker {
+    rows: [Vec<usize>; 2],
+    /// The `index` determines which row is (virtually) `row[0]` and which is `row[1]`.
+    /// If `index` is `0`, then `0 = 0` and `1 = 1`, if `index` is `1`, `0 = 1` and `1 = 0`.
+    index: usize,
+    y: usize,
+}
+
+impl EditLenTracker {
+    fn new(width: usize) -> Self {
+        Self {
+            y: 0,
+            index: 0,
+            rows: [
+                Vec::from_iter((0..width - 1).map(|_| 0)),
+                Vec::from_iter((0..width - 1).map(|_| 0)),
+            ]
+        }
+    }
+
+    #[inline]
+    fn next_row(&mut self) {
+        self.index ^= 1;
+        self.y += 1;
+    }
+
+    #[inline]
+    fn index_of(&self, y: usize) -> usize {
+        debug_assert!(y >= self.y && y < self.y + 2, "y={y} is out of range.");
+        let index = y - self.y;
+        // 0 ^ 0 = 0
+        // 1 ^ 0 = 1
+        // 0 ^ 1 = 1
+        // 1 ^ 1 = 0
+        self.index ^ index
+    }
+
+    fn get_len(&self, x: usize, y: usize) -> usize {
+        match (x, y) {
+            (0, 0) => 0,
+            (0, y) => y,
+            (x, 0) => x,
+            (x, y) => {
+                let row = self.index_of(y);
+                self.rows[row][x - 1]
+            }
+        }
+    }
+
+    fn set_len(&mut self, x: usize, y: usize, value: usize) {
+        match (x, y) {
+            (0, 0) => (),
+            (0, _y) => (),
+            (_x, 0) => (),
+            (x, y) => {
+                let row = self.index_of(y);
+                self.rows[row][x - 1] = value;
+            }
         }
     }
 }
