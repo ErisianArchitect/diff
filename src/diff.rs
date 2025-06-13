@@ -13,16 +13,12 @@ struct EditLenTracker {
     /// If `index` is `0`, then `0 = 0` and `1 = 1`, if `index` is `1`, `0 = 1` and `1 = 0`.
     index: usize,
     y: usize,
-    /// After the table is built, this value should store the last length (which should be the bottom-right).
-    /// If this value represents the value at the bottom-right, that means that this is the final edit script's length.
-    last_len: usize,
 }
 
 impl EditLenTracker {
     fn new(width: usize) -> Self {
         Self {
             y: 0,
-            last_len: 0,
             index: 0,
             rows: [
                 Vec::from_iter((0..width - 1).map(|_| 0)),
@@ -67,8 +63,6 @@ impl EditLenTracker {
             (_x, 0) => (),
             (x, y) => {
                 let row = self.index_of(y);
-                // The last value set to last_len will be the value at the bottom-right corner.
-                self.last_len = value;
                 self.rows[row][x - 1] = value;
             }
         }
@@ -323,7 +317,7 @@ impl<'a, T: PartialEq<T>> EditTable<'a, T> {
             }
             len_tracker.next_row();
         }
-        (len_tracker.last_len, table)
+        (len_tracker.get_len(old.len(), new.len()), table)
     }
 }
 
@@ -446,6 +440,7 @@ impl EditScript {
 impl IntoIterator for EditScript {
     type Item = EditIndex;
     type IntoIter = <Vec::<EditIndex> as IntoIterator>::IntoIter;
+    #[inline]
     fn into_iter(self) -> Self::IntoIter {
         self.edits.into_iter()
     }
@@ -555,7 +550,7 @@ pub fn diff_ranges<T: PartialEq<T>>(old: &[T], new: &[T]) -> Vec<EditRange> {
         (old_len, new_len) if old_len == new_len && old == new => {
             return vec![EditRange::Unchanged((0, old_len))];
         }
-        _ => (),
+        _ => (),                                 
     }
     diff(old, new).build_range_script()
 }
@@ -599,15 +594,19 @@ mod tests {
         let seq_a: &[&str] = &[
             "Hello, World!",
             "The quick brown fox jumps over the lazy dog.",
+            "1",
             "Foo",
             "Bar",
-            // "New edition",
+            "New edition",
             "Baz",
             "Test",
         ];
         let seq_b: &[&str] = &[
             "hello world",
             "The quick brown fox jumps over the lazy dog.",
+            "1",
+            "2",
+            "3",
             "Bar",
             "Baz",
             "Foo",
