@@ -353,11 +353,11 @@ impl DiffRangesBuilder {
                 debug_assert_eq!(end, index, "end does not match index");
                 EditRange::Deleted((start, end + 1))
             }
-            (None, edit) => {
-                edit.range_start()
-            }
             (Some(range), edit) => {
                 self.ranges.push(range);
+                edit.range_start()
+            }
+            (None, edit) => {
                 edit.range_start()
             }
         });
