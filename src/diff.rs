@@ -390,9 +390,10 @@ impl EditRangeCounter {
 
     #[inline]
     fn push(&mut self, edit_type: EditType) {
-        if self.current_type != Some(edit_type) {
+        let edit_type = Some(edit_type);
+        if self.current_type != edit_type {
             self.count += 1;
-            self.current_type = Some(edit_type);
+            self.current_type = edit_type;
         }
     }
 }
