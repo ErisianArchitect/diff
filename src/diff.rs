@@ -249,6 +249,11 @@ impl<'a, T: PartialEq<T>> EditTable<'a, T> {
         }
     }
 
+    /// Compares `old[x - 1]` with `new[y - 1]` if both `x` and `y` are `> 0`.
+    /// Other wise, here is how the result is determined:
+    /// `(x == 0, y == 0) : true`
+    /// `(x == 0, y > 0) : false`
+    /// `(x > 0, y == 0)` : false`
     fn compare(&self, x: usize, y: usize) -> bool {
         match (x, y) {
             (0, 0) => true,
